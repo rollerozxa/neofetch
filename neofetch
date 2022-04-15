@@ -1,0 +1,1207 @@
+#!/usr/bin/env bash
+# vim: noai:ts=4:sw=4:expandtab
+# shellcheck source=/dev/null
+# shellcheck disable=2009
+#
+# Neofetch: A command-line system information tool written in bash 3.2+.
+# https://github.com/dylanaraps/neofetch
+#
+# The MIT License (MIT)
+#
+# Copyright (c) 2015-2020 Dylan Araps
+# Copyright (c) 2022 ROllerozxa
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+version=1.0.0
+
+# Fallback to a value of '5' for shells which support bash
+# but do not set the 'BASH_' shell variables (osh).
+bash_version=${BASH_VERSINFO[0]:-5}
+shopt -s eval_unsafe_arith &>/dev/null
+
+sys_locale=${LANG:-C}
+XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME}/.config}
+PATH=$PATH:/usr/xpg4/bin:/usr/sbin:/sbin:/usr/etc:/usr/libexec
+reset='\e[0m'
+shopt -s nocasematch
+
+# Speed up script by not using unicode.
+LC_ALL=C
+LANG=C
+
+# DETECT INFORMATION
+
+get_os() {
+	os="Linux"
+}
+
+get_distro() {
+	[[ $distro ]] && return
+
+	if type -p lsb_release >/dev/null; then
+		lsb_flags=-sd
+		distro=$(lsb_release "$lsb_flags")
+
+	elif [[ -f /etc/os-release || \
+			-f /usr/lib/os-release || \
+			-f /etc/lsb-release ]]; then
+
+		# Source the os-release file
+		for file in /etc/lsb-release /usr/lib/os-release \
+					/etc/os-release; do
+			source "$file" && break
+		done
+
+		print "lol"
+
+		# Format the distro name.
+		distro="${PRETTY_NAME:-${DISTRIB_DESCRIPTION}}"
+
+
+		for release_file in /etc/*-release; do
+			distro+=$(< "$release_file")
+		done
+
+		if [[ -z $distro ]]; then
+			distro="$kernel_name $kernel_version"
+		fi
+	fi
+
+	distro=$(trim_quotes "$distro")
+	distro=${distro/NAME=}
+	distro=${distro/release}
+
+	[[ $distro ]] || distro="$os (Unknown)"
+
+	# Get OS architecture.
+	machine_arch=$kernel_machine
+
+	distro+=" $machine_arch"
+
+	[[ ${ascii_distro:-auto} == auto ]] && \
+		ascii_distro=$(trim "$distro")
+}
+
+get_title() {
+	user=${USER:-$(id -un || printf %s "${HOME/*\/}")}
+
+	hostname=${HOSTNAME:-$(hostname)}
+
+	title=${title_color}${bold}${user}${at_color}@${title_color}${bold}${hostname}
+	length=$((${#user} + ${#hostname} + 1))
+}
+
+get_kernel() {
+	kernel="$kernel_name $kernel_version"
+}
+
+get_uptime() {
+	# Get uptime in seconds.
+	if [[ -r /proc/uptime ]]; then
+		s=$(< /proc/uptime)
+		s=${s/.*}
+	else
+		boot=$(date -d"$(uptime -s)" +%s)
+		now=$(date +%s)
+		s=$((now - boot))
+	fi
+
+	d="$((s / 60 / 60 / 24)) days"
+	h="$((s / 60 / 60 % 24)) hours"
+	m="$((s / 60 % 60)) minutes"
+
+	# Remove plural if < 2.
+	((${d/ *} == 1)) && d=${d/s}
+	((${h/ *} == 1)) && h=${h/s}
+	((${m/ *} == 1)) && m=${m/s}
+
+	# Hide empty fields.
+	((${d/ *} == 0)) && unset d
+	((${h/ *} == 0)) && unset h
+	((${m/ *} == 0)) && unset m
+
+	uptime=${d:+$d, }${h:+$h, }$m
+	uptime=${uptime%', '}
+	uptime=${uptime:-$s seconds}
+
+	# Make the output of uptime smaller.
+	uptime=${uptime/ minutes/ mins}
+	uptime=${uptime/ minute/ min}
+	uptime=${uptime/ seconds/ secs}
+}
+
+get_packages() {
+	packages="$(pacman -Qqe | wc -l) / $(pacman -Qq | wc -l) (pacman)"
+}
+
+get_shell() {
+	shell="${SHELL##*/} "
+
+	case ${shell_name:=${SHELL##*/}} in
+		bash)
+			[[ $BASH_VERSION ]] ||
+				BASH_VERSION=$("$SHELL" -c "printf %s \"\$BASH_VERSION\"")
+
+			shell+=${BASH_VERSION/-*}
+		;;
+
+		sh|ash|dash|es) ;;
+
+		*)
+			shell+=$("$SHELL" --version 2>&1)
+			shell=${shell/ $shell_name}
+		;;
+	esac
+
+	# Remove unwanted info.
+	shell=${shell/, version}
+	shell=${shell/xonsh\//xonsh }
+	shell=${shell/options*}
+	shell=${shell/\(*\)}
+}
+
+get_de() {
+	# If function was run, stop here.
+	((de_run == 1)) && return
+
+	((wm_run != 1)) && get_wm
+
+	if [[ $XDG_CURRENT_DESKTOP ]]; then
+		de=${XDG_CURRENT_DESKTOP/X\-}
+	elif [[ $DESKTOP_SESSION ]]; then
+		de=${DESKTOP_SESSION##*/}
+	fi
+
+	# When a window manager is started from a display manager
+	# the desktop variables are sometimes also set to the
+	# window manager name. This checks to see if WM == DE
+	# and discards the DE value.
+	[[ $de == "$wm" ]] && { unset -v de; return; }
+
+	((${KDE_SESSION_VERSION:-0} >= 4)) && de=${de/KDE/Plasma}
+
+	if [[ $de ]]; then
+		case $de in
+			#Plasma*)   de_ver=$(plasmashell --version) ;;
+			LXQt*)     de_ver=$(lxqt-session --version) ;;
+		esac
+
+		de_ver=${de_ver/liblxqt*}
+		de_ver=${de_ver/Copyright*}
+		de_ver=${de_ver/)*}
+		de_ver=${de_ver/* }
+		de_ver=${de_ver//\"}
+
+		de+=" $de_ver"
+	fi
+
+	# TODO:
+	#  - New config option + flag: --de_display_server on/off ?
+	#  - Add display of X11, Arcan and anything else relevant.
+	[[ $de && $WAYLAND_DISPLAY ]] &&
+		de+=" (Wayland)"
+
+	de_run=1
+}
+
+get_wm() {
+	# If function was run, stop here.
+	((wm_run == 1)) && return
+
+	ps_flags=(-e)
+
+	if [[ -O "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-0}" ]]; then
+		if tmp_pid="$(lsof -t "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-0}" 2>&1)" ||
+		   tmp_pid="$(fuser   "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-0}" 2>&1)"; then
+			wm="$(ps -p "${tmp_pid}" -ho comm=)"
+		else
+			# lsof may not exist, or may need root on some systems. Similarly fuser.
+			# On those systems we search for a list of known window managers, this can mistakenly
+			# match processes for another user or session and will miss unlisted window managers.
+			wm=$(ps "${ps_flags[@]}" | grep -m 1 -o -F \
+							   -e kwin)
+		fi
+
+	elif [[ $DISPLAY ]]; then
+		[[ -z $wm ]] && type -p xprop &>/dev/null && {
+			id=$(xprop -root -notype _NET_SUPPORTING_WM_CHECK)
+			id=${id##* }
+			wm=$(xprop -id "$id" -notype -len 100 -f _NET_WM_NAME 8t)
+			wm=${wm/*WM_NAME = }
+			wm=${wm/\"}
+			wm=${wm/\"*}
+		}
+	fi
+
+	wm_run=1
+}
+
+get_cpu() {
+	# Get CPU name.
+	cpu_file="/proc/cpuinfo"
+
+	case $kernel_machine in
+		"s390"*)
+			cpu="$(awk -F'=' '/machine/ {print $4; exit}' "$cpu_file")"
+		;;
+
+		"ia64" | "m32r")
+			cpu="$(awk -F':' '/model/ {print $2; exit}' "$cpu_file")"
+			[[ -z "$cpu" ]] && cpu="$(awk -F':' '/family/ {printf $2; exit}' "$cpu_file")"
+		;;
+
+		*)
+			cpu="$(awk -F '\\s*: | @' \
+					'/model name|Hardware|Processor|^cpu model|chip type|^cpu type/ {
+					cpu=$2; if ($1 == "Hardware") exit } END { print cpu }' "$cpu_file")"
+		;;
+	esac
+
+	speed_dir="/sys/devices/system/cpu/cpu0/cpufreq"
+
+	# Select the right temperature file.
+	for temp_dir in /sys/class/hwmon/*; do
+		[[ "$(< "${temp_dir}/name")" =~ (cpu_thermal|coretemp|fam15h_power|k10temp) ]] && {
+			temp_dirs=("$temp_dir"/temp*_input)
+			temp_dir=${temp_dirs[0]}
+			break
+		}
+	done
+
+	# Get CPU speed.
+	if [[ -d "$speed_dir" ]]; then
+		# Fallback to bios_limit if $speed_type fails.
+		speed="$(< "${speed_dir}/${speed_type}")" ||\
+		speed="$(< "${speed_dir}/bios_limit")" ||\
+		speed="$(< "${speed_dir}/scaling_max_freq")" ||\
+		speed="$(< "${speed_dir}/cpuinfo_max_freq")"
+		speed="$((speed / 1000))"
+
+	else
+		speed="$(awk -F ': |\\.' '/cpu MHz|^clock/ {printf $2; exit}' "$cpu_file")"
+		speed="${speed/MHz}"
+	fi
+
+	# Get CPU temp.
+	[[ -f "$temp_dir" ]] && deg="$(($(< "$temp_dir") * 100 / 10000))"
+
+	# Get CPU cores.
+	cores="$(grep -c "^processor" "$cpu_file")"
+
+	# Remove un-needed patterns from cpu output.
+	cpu="${cpu//(TM)}"
+	cpu="${cpu//(tm)}"
+	cpu="${cpu//(R)}"
+	cpu="${cpu//(r)}"
+	cpu="${cpu//CPU}"
+	cpu="${cpu//Processor}"
+	cpu="${cpu//Dual-Core}"
+	cpu="${cpu//Quad-Core}"
+	cpu="${cpu//Six-Core}"
+	cpu="${cpu//Eight-Core}"
+	cpu="${cpu//[1-9][0-9]-Core}"
+	cpu="${cpu//[0-9]-Core}"
+	cpu="${cpu//, * Compute Cores}"
+	cpu="${cpu//Core / }"
+	cpu="${cpu//(\"AuthenticAMD\"*)}"
+	cpu="${cpu//with Radeon * Graphics}"
+	cpu="${cpu//, altivec supported}"
+	cpu="${cpu//FPU*}"
+	cpu="${cpu//Chip Revision*}"
+	cpu="${cpu//Technologies, Inc}"
+	cpu="${cpu//Core2/Core 2}"
+
+	# Trim spaces from core and speed output
+	cores="${cores//[[:space:]]}"
+	speed="${speed//[[:space:]]}"
+
+	# Add CPU cores to the output.
+	[[ "$cores" ]] && cpu="$cpu ($cores)"
+
+	# Add CPU speed to the output.
+	if [[ "$speed" ]]; then
+		if (( speed < 1000 )); then
+			cpu="$cpu @ ${speed}MHz"
+		else
+			speed="${speed:0:1}.${speed:1}"
+			cpu="$cpu @ ${speed}GHz"
+		fi
+	fi
+
+	# Add CPU temp to the output.
+	# TODO: make this more accurate to inxi
+	#if [[ "$deg" ]]; then
+	#	deg="${deg//.}"
+
+		# Format the output
+	#	deg="[${deg/${deg: -1}}.${deg: -1}°${cpu_temp:-C}]"
+	#	cpu="$cpu $deg"
+	#fi
+}
+
+get_gpu() {
+	# Read GPUs into array.
+	gpu_cmd="$(lspci -mm |
+				awk -F '\"|\" \"|\\(' \
+						'/"Display|"3D|"VGA/ {
+							a[$0] = $1 " " $3 " " ($(NF-1) ~ /^$|^Device [[:xdigit:]]+$/ ? $4 : $(NF-1))
+						}
+						END { for (i in a) {
+							if (!seen[a[i]]++) {
+								sub("^[^ ]+ ", "", a[i]);
+								print a[i]
+							}
+						}}')"
+	IFS=$'\n' read -d "" -ra gpus <<< "$gpu_cmd"
+
+	# Remove duplicate Intel Graphics outputs.
+	# This fixes cases where the outputs are both
+	# Intel but not entirely identical.
+	#
+	# Checking the first two array elements should
+	# be safe since there won't be 2 intel outputs if
+	# there's a dedicated GPU in play.
+	[[ "${gpus[0]}" == *Intel* && "${gpus[1]}" == *Intel* ]] && unset -v "gpus[0]"
+
+	for gpu in "${gpus[@]}"; do
+		# GPU shorthand tests.
+		[[ "$gpu_type" == "dedicated" && "$gpu" == *Intel* ]] || \
+		[[ "$gpu_type" == "integrated" && ! "$gpu" == *Intel* ]] && \
+			{ unset -v gpu; continue; }
+
+		case $gpu in
+			*"Advanced"*)
+				brand="${gpu/*AMD*ATI*/AMD ATI}"
+				brand="${brand:-${gpu/*AMD*/AMD}}"
+				brand="${brand:-${gpu/*ATI*/ATi}}"
+
+				gpu="${gpu/\[AMD\/ATI\] }"
+				gpu="${gpu/\[AMD\] }"
+				gpu="${gpu/OEM }"
+				gpu="${gpu/Advanced Micro Devices, Inc.}"
+				gpu="${gpu/*\[}"
+				gpu="${gpu/\]*}"
+				gpu="$brand $gpu"
+			;;
+
+			*"VirtualBox"*)
+				gpu="VirtualBox Graphics Adapter"
+			;;
+
+			*) continue ;;
+		esac
+
+		prin "${subtitle:+${subtitle}${gpu_name}}" "$gpu"
+	done
+}
+
+get_memory() {
+	# MemUsed = Memtotal + Shmem - MemFree - Buffers - Cached - SReclaimable
+	# Source: https://github.com/KittyKatt/screenFetch/issues/386#issuecomment-249312716
+	while IFS=":" read -r a b; do
+		case $a in
+			"MemTotal") ((mem_used+=${b/kB})); mem_total="${b/kB}" ;;
+			"Shmem") ((mem_used+=${b/kB}))  ;;
+			"MemFree" | "Buffers" | "Cached" | "SReclaimable")
+				mem_used="$((mem_used-=${b/kB}))"
+			;;
+
+			# Available since Linux 3.14rc (34e431b0ae398fc54ea69ff85ec700722c9da773).
+			# If detected this will be used over the above calculation for mem_used.
+			"MemAvailable")
+				mem_avail=${b/kB}
+			;;
+		esac
+	done < /proc/meminfo
+
+	if [[ $mem_avail ]]; then
+		mem_used=$(((mem_total - mem_avail) / 1024))
+	else
+		mem_used="$((mem_used / 1024))"
+	fi
+
+	mem_total="$((mem_total / 1024))"
+
+	((mem_perc=mem_used * 100 / mem_total))
+
+	memory="${mem_used}${mem_label:-MiB} / ${mem_total}${mem_label:-MiB} ${mem_perc:+(${mem_perc}%)}"
+}
+
+get_resolution() {
+	if type -p xrandr >/dev/null && [[ $DISPLAY && -z $WAYLAND_DISPLAY ]]; then
+		resolution="$(xrandr --nograb --current |\
+						awk -F 'connected |\\+|\\(' \
+								'/ connected.*[0-9]+x[0-9]+\+/ && $2 {printf $2 ", "}')"
+
+		resolution="${resolution/primary, }"
+		resolution="${resolution/primary }"
+
+		resolution="${resolution//\*}"
+
+	elif type -p xwininfo >/dev/null && [[ $DISPLAY && -z $WAYLAND_DISPLAY ]]; then
+		read -r w h \
+			<<< "$(xwininfo -root | awk -F':' '/Width|Height/ {printf $2}')"
+		resolution="${w}x${h}"
+
+	elif type -p xdpyinfo >/dev/null && [[ $DISPLAY && -z $WAYLAND_DISPLAY ]]; then
+		resolution="$(xdpyinfo | awk '/dimensions:/ {printf $2}')"
+
+	elif [[ -d /sys/class/drm ]]; then
+		for dev in /sys/class/drm/*/modes; do
+			read -r single_resolution _ < "$dev"
+
+			[[ $single_resolution ]] && resolution="${single_resolution}, ${resolution}"
+		done
+	fi
+
+	resolution="${resolution%%,}"
+	resolution="${resolution%%, }"
+	[[ -z "${resolution/x}" ]] && resolution=
+}
+
+get_style() {
+	# Fix weird output when the function is run multiple times.
+	unset gtk2_theme gtk3_theme theme path
+
+	if [[ "$DISPLAY" ]]; then
+		# Get DE if user has disabled the function.
+		((de_run != 1)) && get_de
+
+		# Remove version from '$de'.
+		de=${de/ *}
+
+		# Check for DE Theme.
+		case $de in
+			"KDE"* | "Plasma"*)
+				kde_config_dir
+
+				if [[ -f "${kde_config_dir}/kdeglobals" ]]; then
+					kde_config_file="${kde_config_dir}/kdeglobals"
+
+					kde_theme="$(grep "^${kde}" "$kde_config_file")"
+					kde_theme="${kde_theme/*=}"
+					if [[ "$kde" == "font" ]]; then
+						kde_font_size="${kde_theme#*,}"
+						kde_font_size="${kde_font_size/,*}"
+						kde_theme="${kde_theme/,*} ${kde_theme/*,} ${kde_font_size}"
+					fi
+					kde_theme="$kde_theme [$de], "
+				else
+					err "Theme: KDE config files not found, skipping."
+				fi
+			;;
+		esac
+
+		# Check for general GTK2 Theme.
+		if [[ -z "$gtk2_theme" ]]; then
+			if [[ -n "$GTK2_RC_FILES" ]]; then
+				IFS=: read -ra rc_files <<< "$GTK2_RC_FILES"
+				gtk2_theme="$(grep "^[^#]*${name}" "${rc_files[@]}")"
+			elif [[ -f "${HOME}/.gtkrc-2.0"  ]]; then
+				gtk2_theme="$(grep "^[^#]*${name}" "${HOME}/.gtkrc-2.0")"
+
+			elif [[ -f "/etc/gtk-2.0/gtkrc" ]]; then
+				gtk2_theme="$(grep "^[^#]*${name}" /etc/gtk-2.0/gtkrc)"
+
+			elif [[ -f "/usr/share/gtk-2.0/gtkrc" ]]; then
+				gtk2_theme="$(grep "^[^#]*${name}" /usr/share/gtk-2.0/gtkrc)"
+
+			fi
+
+			gtk2_theme="${gtk2_theme/*${name}*=}"
+		fi
+
+		# Check for general GTK3 Theme.
+		if [[ -z "$gtk3_theme" ]]; then
+			if [[ -f "${XDG_CONFIG_HOME}/gtk-3.0/settings.ini" ]]; then
+				gtk3_theme="$(grep "^[^#]*$name" "${XDG_CONFIG_HOME}/gtk-3.0/settings.ini")"
+
+			elif type -p gsettings >/dev/null; then
+				gtk3_theme="$(gsettings get org.gnome.desktop.interface "$gsettings")"
+
+			elif [[ -f "/etc/gtk-3.0/settings.ini" ]]; then
+				gtk3_theme="$(grep "^[^#]*$name" /etc/gtk-3.0/settings.ini)"
+
+			elif [[ -f "/usr/share/gtk-3.0/settings.ini" ]]; then
+				gtk3_theme="$(grep "^[^#]*$name" /usr/share/gtk-3.0/settings.ini)"
+			fi
+
+			gtk3_theme="${gtk3_theme/${name}*=}"
+		fi
+
+		# Trim whitespace.
+		gtk2_theme="$(trim "$gtk2_theme")"
+		gtk3_theme="$(trim "$gtk3_theme")"
+
+		# Remove quotes.
+		gtk2_theme="$(trim_quotes "$gtk2_theme")"
+		gtk3_theme="$(trim_quotes "$gtk3_theme")"
+
+		# Format the string based on which themes exist.
+		if [[ "$gtk2_theme" && "$gtk2_theme" == "$gtk3_theme" ]]; then
+			gtk3_theme+=" [GTK2/3]"
+			unset gtk2_theme
+
+		elif [[ "$gtk2_theme" && "$gtk3_theme" ]]; then
+			gtk2_theme+=" [GTK2], "
+			gtk3_theme+=" [GTK3] "
+
+		else
+			[[ "$gtk2_theme" ]] && gtk2_theme+=" [GTK2] "
+			[[ "$gtk3_theme" ]] && gtk3_theme+=" [GTK3] "
+		fi
+
+		# Final string.
+		theme="${kde_theme}${gtk2_theme}${gtk3_theme}"
+		theme="${theme%, }"
+	fi
+}
+
+get_theme() {
+	name="gtk-theme-name"
+	gsettings="gtk-theme"
+	gconf="gtk_theme"
+	xfconf="/Net/ThemeName"
+	kde="Name"
+
+	get_style
+}
+
+get_icons() {
+	name="gtk-icon-theme-name"
+	gsettings="icon-theme"
+	gconf="icon_theme"
+	xfconf="/Net/IconThemeName"
+	kde="Theme"
+
+	get_style
+	icons="$theme"
+}
+
+get_term() {
+	# If function was run, stop here.
+	((term_run == 1)) && return
+
+	[[ "$SSH_CONNECTION" ]] && term="$SSH_TTY"
+
+	# Check $PPID for terminal emulator.
+	while [[ -z "$term" ]]; do
+		parent="$(get_ppid "$parent")"
+		[[ -z "$parent" ]] && break
+		name="$(get_process_name "$parent")"
+
+		case ${name// } in
+			"${SHELL/*\/}"|*"sh"|"screen"|"su"*|"newgrp") ;;
+
+			"login"*|*"Login"*|"init"|"(init)")
+				term="$(tty)"
+			;;
+
+			"ruby"|"1"|"tmux"*|"systemd"|"sshd"*|"python"*|\
+			"USER"*"PID"*|"kdeinit"*|"launchd"*|"bwrap")
+				break
+			;;
+
+			*)
+				# Fix issues with long process names on Linux.
+				[[ $os == Linux ]] && term=$(realpath "/proc/$parent/exe")
+
+				term="${name##*/}"
+
+				# Fix wrapper names in Nix.
+				[[ $term == .*-wrapped ]] && {
+				   term="${term#.}"
+				   term="${term%-wrapped}"
+				}
+			;;
+		esac
+	done
+
+	# Log that the function was run.
+	term_run=1
+}
+
+get_disk() {
+	type -p df &>/dev/null ||
+		{ err "Disk requires 'df' to function. Install 'df' to get disk info."; return; }
+
+	disk_show=('/')
+
+	df_version=$(df --version 2>&1)
+
+	df_flags=(-P -h)
+
+	# Create an array called 'disks' where each element is a separate line from
+	# df's output. We then unset the first element which removes the column titles.
+	IFS=$'\n' read -d "" -ra disks <<< "$(df "${df_flags[@]}" "${disk_show[@]:-/}")"
+	unset "disks[0]"
+
+	# Stop here if 'df' fails to print disk info.
+	[[ ${disks[*]} ]] || {
+		err "Disk: df failed to print the disks, make sure the disk_show array is set properly."
+		return
+	}
+
+	for disk in "${disks[@]}"; do
+		# Create a second array and make each element split at whitespace this time.
+		IFS=" " read -ra disk_info <<< "$disk"
+		disk_perc=${disk_info[${#disk_info[@]} - 2]/\%}
+
+		case $df_version in
+			*befhikm*)
+				disk=$((disk_info[${#disk_info[@]} - 4] / 1024 / 1024))G
+				disk+=" / "
+				disk+=$((disk_info[${#disk_info[@]} - 5] / 1024/ 1024))G
+				disk+=${disk_perc:+ ($disk_perc%)}
+			;;
+
+			*)
+				disk=${disk_info[${#disk_info[@]} - 4]/i}
+				disk+=" / "
+				disk+=${disk_info[${#disk_info[@]} - 5]/i}
+				disk+=${disk_perc:+ ($disk_perc%)}
+			;;
+		esac
+
+		disk_sub=${disk_info[${#disk_info[@]} - 1]}
+
+		# Append '(disk mount point)' to the subtitle.
+		if [[ "$subtitle" ]]; then
+			prin "$subtitle${disk_sub:+ ($disk_sub)}" "$disk"
+		else
+			prin "$disk_sub" "$disk"
+		fi
+	done
+}
+
+get_cols() {
+	local blocks blocks2 cols
+
+	block_range=(0 15)
+	block_width=3
+	block_height=1
+	# Convert the width to space chars.
+	printf -v block_width "%${block_width}s"
+
+	# Generate the string.
+	for ((block_range[0]; block_range[0]<=block_range[1]; block_range[0]++)); do
+		case ${block_range[0]} in
+			[0-7])
+				printf -v blocks  '%b\e[3%bm\e[4%bm%b' \
+					"$blocks" "${block_range[0]}" "${block_range[0]}" "$block_width"
+			;;
+
+			*)
+				printf -v blocks2 '%b\e[38;5;%bm\e[48;5;%bm%b' \
+					"$blocks2" "${block_range[0]}" "${block_range[0]}" "$block_width"
+			;;
+		esac
+	done
+
+	# Convert height into spaces.
+	printf -v block_spaces "%${block_height}s"
+
+	# Convert the spaces into rows of blocks.
+	[[ "$blocks"  ]] && cols+="${block_spaces// /${blocks}[mnl}"
+	[[ "$blocks2" ]] && cols+="${block_spaces// /${blocks2}[mnl}"
+
+	# Add newlines to the string.
+	cols=${cols%%nl}
+	cols=${cols//nl/
+[${text_padding}C${zws}}
+
+	# Add block height to info height.
+	((info_height+=block_range[1]>7?block_height+2:block_height+1))
+
+	printf '\n\e[%bC%b\n' "$text_padding" "${zws}${cols}"
+
+	unset -v blocks blocks2 cols
+
+	# Tell info() that we printed manually.
+	prin=1
+}
+
+# IMAGES
+
+image_backend() {
+	print_ascii
+	printf '\e[%sA\e[9999999D' "${lines:-0}"
+}
+
+print_ascii() {
+	if [[ -f "$image_source" && ! "$image_source" =~ (png|jpg|jpeg|jpe|svg|gif) ]]; then
+		ascii_data="$(< "$image_source")"
+	elif [[ "$image_source" == "ascii" || $image_source == auto ]]; then
+		:
+	else
+		ascii_data="$image_source"
+	fi
+
+	# Set locale to get correct padding.
+	LC_ALL="$sys_locale"
+
+	# Calculate size of ascii file in line length / line count.
+	while IFS=$'\n' read -r line; do
+		line=${line//\\\\/\\}
+		line=${line//█/ }
+		((++lines,${#line}>ascii_len)) && ascii_len="${#line}"
+	done <<< "${ascii_data//\$\{??\}}"
+
+	# Fallback if file not found.
+	((lines==1)) && {
+		lines=
+		ascii_len=
+		image_source=auto
+		get_distro_ascii
+		print_ascii
+		return
+	}
+
+	# Colors.
+	ascii_data="${ascii_data//\$\{c1\}/$c1}"
+	ascii_data="${ascii_data//\$\{c2\}/$c2}"
+	ascii_data="${ascii_data//\$\{c3\}/$c3}"
+	ascii_data="${ascii_data//\$\{c4\}/$c4}"
+	ascii_data="${ascii_data//\$\{c5\}/$c5}"
+	ascii_data="${ascii_data//\$\{c6\}/$c6}"
+
+	gap=3
+	((text_padding=ascii_len+gap))
+	printf '%b\n' "$ascii_data${reset}"
+	LC_ALL=C
+}
+
+to_ascii() {
+	err "$1"
+	image_backend="ascii"
+	print_ascii
+
+	# Set cursor position next image/ascii.
+	printf '\e[%sA\e[9999999D' "${lines:-0}"
+}
+
+to_off() {
+	err "$1"
+	image_backend="off"
+	text_padding=
+}
+
+
+# TEXT FORMATTING
+
+info() {
+	# Save subtitle value.
+	[[ "$2" ]] && subtitle="$1"
+
+	# Make sure that $prin is unset.
+	unset -v prin
+
+	# Call the function.
+	"get_${2:-$1}"
+
+	# If the get_func function called 'prin' directly, stop here.
+	[[ "$prin" ]] && return
+
+	# Update the variable.
+	if [[ "$2" ]]; then
+		output="$(trim "${!2}")"
+	else
+		output="$(trim "${!1}")"
+	fi
+
+	if [[ "$2" && "${output// }" ]]; then
+		prin "$1" "$output"
+
+	elif [[ "${output// }" ]]; then
+		prin "$output"
+
+	else
+		err "Info: Couldn't detect ${1}."
+	fi
+
+	unset -v subtitle
+}
+
+prin() {
+	# If $2 doesn't exist we format $1 as info.
+	if [[ "$(trim "$1")" && "$2" ]]; then
+		[[ "$json" ]] && { printf '    %s\n' "\"${1}\": \"${2}\","; return; }
+
+		string="${1}${2:+: $2}"
+	else
+		string="${2:-$1}"
+		local subtitle_color="$info_color"
+	fi
+
+	string="$(trim "${string//$'\e[0m'}")"
+	length="$(strip_sequences "$string")"
+	length="${#length}"
+
+	# Format the output.
+	string="${string/:/${reset}${colon_color}:${info_color}}"
+	string="${subtitle_color}${bold}${string}"
+
+	# Print the info.
+	printf '%b\n' "${text_padding:+\e[${text_padding}C}${zws}${string//\\n}${reset} "
+
+	# Calculate info height.
+	((++info_height))
+
+	# Log that prin was used.
+	prin=1
+}
+
+get_underline() {
+	printf -v underline "%${length}s"
+	underline_char="-"
+	printf '%b%b\n' "${text_padding:+\e[${text_padding}C}${zws}${underline_color}" \
+					"${underline// /$underline_char}${reset} "
+
+	((++info_height))
+	length=
+	prin=1
+}
+
+get_bold() {
+	ascii_bold='\e[1m'
+	bold='\e[1m'
+}
+
+trim() {
+	set -f
+	# shellcheck disable=2048,2086
+	set -- $*
+	printf '%s\n' "${*//[[:space:]]/}"
+	set +f
+}
+
+trim_quotes() {
+	trim_output="${1//\'}"
+	trim_output="${trim_output//\"}"
+	printf "%s" "$trim_output"
+}
+
+strip_sequences() {
+	strip="${1//$'\e['3[0-9]m}"
+	strip="${strip//$'\e['[0-9]m}"
+	strip="${strip//\\e\[[0-9]m}"
+	strip="${strip//$'\e['38\;5\;[0-9]m}"
+	strip="${strip//$'\e['38\;5\;[0-9][0-9]m}"
+	strip="${strip//$'\e['38\;5\;[0-9][0-9][0-9]m}"
+
+	printf '%s\n' "$strip"
+}
+
+# COLORS
+
+set_colors() {
+	c1="$(color "$1")${ascii_bold}"
+	c2="$(color "$2")${ascii_bold}"
+	c3="$(color "$3")${ascii_bold}"
+	c4="$(color "$4")${ascii_bold}"
+	c5="$(color "$5")${ascii_bold}"
+	c6="$(color "$6")${ascii_bold}"
+
+	[[ "$color_text" != "off" ]] && set_text_colors "$@"
+}
+
+set_text_colors() {
+	if [[ "${colors[0]}" == "distro" ]]; then
+		title_color="$(color "$1")"
+		at_color="$reset"
+		underline_color="$reset"
+		subtitle_color="$(color "$2")"
+		colon_color="$reset"
+		info_color="$reset"
+
+		# If the ascii art uses 8 as a color, make the text the fg.
+		((${1:-1} == 8)) && title_color="$reset"
+		((${2:-7} == 8)) && subtitle_color="$reset"
+
+		# If the second color is white use the first for the subtitle.
+		((${2:-7} == 7)) && subtitle_color="$(color "$1")"
+		((${1:-1} == 7)) && title_color="$reset"
+	else
+		title_color="$(color "${colors[0]}")"
+		at_color="$(color "${colors[1]}")"
+		underline_color="$(color "${colors[2]}")"
+		subtitle_color="$(color "${colors[3]}")"
+		colon_color="$(color "${colors[4]}")"
+		info_color="$(color "${colors[5]}")"
+	fi
+}
+
+color() {
+	case $1 in
+		[0-6])    printf '%b\e[3%sm'   "$reset" "$1" ;;
+		7 | "fg") printf '\e[37m%b'    "$reset" ;;
+		*)        printf '\e[38;5;%bm' "$1" ;;
+	esac
+}
+
+# OTHER
+
+err() {
+	err+="$(color 1)[!]${reset} $1
+"
+}
+
+kde_config_dir() {
+	# If the user is using KDE get the KDE
+	# configuration directory.
+	if [[ "$kde_config_dir" ]]; then
+		return
+
+	elif type -p kf5-config &>/dev/null; then
+		kde_config_dir="$(kf5-config --path config)"
+
+	fi
+
+	kde_config_dir="${kde_config_dir/$'/:'*}"
+}
+
+dynamic_prompt() {
+	# If the ascii art is taller than the info.
+	((lines=lines>info_height?lines-info_height+1:1))
+
+	printf -v nlines "%${lines}s"
+	printf "%b" "${nlines// /\\n}"
+}
+
+cache_uname() {
+	# Cache the output of uname so we don't
+	# have to spawn it multiple times.
+	IFS=" " read -ra uname <<< "$(uname -srm)"
+
+	kernel_name="${uname[0]}"
+	kernel_version="${uname[1]}"
+	kernel_machine="${uname[2]}"
+}
+
+get_ppid() {
+	# Get parent process ID of PID.
+	ppid="$(grep -i -F "PPid:" "/proc/${1:-$PPID}/status")"
+	ppid="$(trim "${ppid/PPid:}")"
+
+	printf "%s" "$ppid"
+}
+
+get_process_name() {
+	# Get PID name.
+	name="$(< "/proc/${1:-$PPID}/comm")"
+
+	printf "%s" "$name"
+}
+
+# FINISH UP
+
+usage() { printf "%s" "\
+Usage: neofetch
+
+This is neofetch-rollerozxa, ROllerozxa's neofetch fork.
+Only Arch Linux with specific configurations are supported.
+"
+exit 1
+}
+
+get_args() {
+	while [[ "$1" ]]; do
+		case $1 in
+			# Other
+			"-v") verbose="on" ;;
+			"-vv") set -x; verbose="on" ;;
+			"--help") usage ;;
+		esac
+
+		shift
+	done
+}
+
+get_distro_ascii() {
+	# This function gets the distro ascii art and colors.
+	#
+	# $ascii_distro is the same as $distro.
+	case $(trim "$ascii_distro") in
+		"ROller"*)
+			set_colors 2
+			read -rd '' ascii_data <<'EOF'
+${c1}                 .~J5P&:
+             :~J5J!.  ^&:
+        .^?YY?^.       :&^
+   .^!Y5?~:       P:    :&~
+:BG?!:. .         P&     .#J
+ ^#^    GP         BY      G@5?!:
+  ^&     G^                 ?#::!?J?~.
+   BJ                .~~     ~#:   .^!JJ?
+   :&             ^JGPJ:      .#?      ..
+    #Y        .7PGJ^            YP.
+    &@      .GP7.                Y&.
+    #@!                      ^7YY!.
+    G@G                  :?BY~.
+    7&&              :?5Y!.5P
+    ^#B7        .^7JJ!:     JG.
+    ^B^&    .~Y5?P#          :P~
+    ^B PP^JY?~.   !B.          ?5.
+        ~~.        :B7          :G?
+                     JG:          JB
+                      .GJ          '
+EOF
+		;;
+
+		"Arch"*)
+			set_colors 6 6 7 1
+			read -rd '' ascii_data <<'EOF'
+${c1}                   -`
+                  .o+`
+                 `ooo/
+                `+oooo:
+               `+oooooo:
+               -+oooooo+:
+             `/:-:++oooo+:
+            `/++++/+++++++:
+           `/++++++++++++++:
+          `/+++o${c2}oooooooo${c1}oooo/`
+${c2}         ${c1}./${c2}ooosssso++osssssso${c1}+`
+${c2}        .oossssso-````/ossssss+`
+       -osssssso.      :ssssssso.
+      :osssssss/        osssso+++.
+     /ossssssss/        +ssssooo/-
+   `/ossssso+/:-        -:/+osssso+-
+  `+sso+:-`                 `.-/+oso:
+ `++:.                           `-/+/
+ .`                                 `/
+EOF
+		;;
+
+		"Windows"*)
+			set_colors 1 2 4 3
+			read -rd '' ascii_data <<'EOF'
+${c1}        ,.=:!!t3Z3z.,
+       :tt:::tt333EE3
+${c1}       Et:::ztt33EEEL${c2} @Ee.,      ..,
+${c1}      ;tt:::tt333EE7${c2} ;EEEEEEttttt33#
+${c1}     :Et:::zt333EEQ.${c2} $EEEEEttttt33QL
+${c1}     it::::tt333EEF${c2} @EEEEEEttttt33F
+${c1}    ;3=*^```"*4EEV${c2} :EEEEEEttttt33@.
+${c3}    ,.=::::!t=., ${c1}`${c2} @EEEEEEtttz33QF
+${c3}   ;::::::::zt33)${c2}   "4EEEtttji3P*
+${c3}  :t::::::::tt33.${c4}:Z3z..${c2}  ``${c4} ,..g.
+${c3}  i::::::::zt33F${c4} AEEEtttt::::ztF
+${c3} ;:::::::::t33V${c4} ;EEEttttt::::t3
+${c3} E::::::::zt33L${c4} @EEEtttt::::z3F
+${c3}{3=*^```"*4E3)${c4} ;EEEtttt:::::tZ`
+${c3}             `${c4} :EEEEtttt::::z7
+                 "VEzjt:;;z>*`
+EOF
+		;;
+
+		*)
+			case $kernel_name in
+				"Linux")
+					set_colors fg 8 3
+					read -rd '' ascii_data <<'EOF'
+${c2}        #####
+${c2}       #######
+${c2}       ##${c1}O${c2}#${c1}O${c2}##
+${c2}       #${c3}#####${c2}#
+${c2}     ##${c1}##${c3}###${c1}##${c2}##
+${c2}    #${c1}##########${c2}##
+${c2}   #${c1}############${c2}##
+${c2}   #${c1}############${c2}###
+${c3}  ##${c2}#${c1}###########${c2}##${c3}#
+${c3}######${c2}#${c1}#######${c2}#${c3}######
+${c3}#######${c2}#${c1}#####${c2}#${c3}#######
+${c3}  #####${c2}#######${c3}#####
+EOF
+				;;
+			esac
+		;;
+	esac
+
+	# Overwrite distro colors if '$ascii_colors' doesn't
+	# equal 'distro'.
+	[[ ${ascii_colors[0]} != distro ]] && {
+		color_text=off
+		set_colors "${ascii_colors[@]}"
+	}
+}
+
+print_info() {
+	info title
+	info underline
+
+	info "OS" distro
+	info "Kernel" kernel
+	info "Uptime" uptime
+	info "Packages" packages
+	info "Shell" shell
+	info "Resolution" resolution
+	info "DE" de
+	info "WM" wm
+	info "Theme" theme
+	info "Icons" icons
+	info "Terminal" term
+	info "CPU" cpu
+	info "GPU" gpu
+	info "Memory" memory
+
+	info "Disk" disk
+
+	info cols
+}
+
+colors=(distro)
+
+ascii_colors=(distro)
+
+main() {
+	cache_uname
+	get_os
+
+	# Load default config.
+	eval "$config"
+
+	get_args "$@"
+	[[ $verbose != on ]] && exec 2>/dev/null
+	#get_simple "$@"
+	get_distro
+	get_bold
+	get_distro_ascii
+
+	# If the script exits for any reason, unhide the cursor.
+	trap 'printf "\e[?25h\e[?7h"' EXIT
+
+	# Hide the cursor and disable line wrap.
+	printf '\e[?25l\e[?7l'
+
+	image_backend
+	print_info
+	dynamic_prompt
+
+	# Add neofetch info to verbose output.
+	err "Neofetch command: $0 $*"
+	err "Neofetch version: $version"
+
+	[[ $verbose == on ]] && printf %b "$err" >&2
+
+	return 0
+}
+
+main "$@"
